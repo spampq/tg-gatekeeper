@@ -20,7 +20,6 @@ def run_health_check_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-# Запускаем веб-сервер в фоновом потоке
 threading.Thread(target=run_health_check_server, daemon=True).start()
 
 # === 2. НАСТРОЙКИ ЮЗЕРБОТА ===
@@ -28,6 +27,7 @@ API_ID = int(os.environ.get("API_ID", 28155925))
 API_HASH = os.environ.get("API_HASH", "13cf6bb2641bfb7e67548650d65d9e7e")
 SESSION_STRING = os.environ.get("SESSION_STRING", "")
 
+# Список каналов по умолчанию
 REQUIRED_CHANNELS = ["@skuprat", "@RatLolz"]
 
 def main():
@@ -43,6 +43,31 @@ def main():
                 return False
         return True
 
+    # === КОМАНДЫ УПРАВЛЕНИЯ КАНАЛАМИ (.об / .необ) ===
+    @client.on(events.NewMessage(outgoing=True, pattern=r'^\.(об|необ)\s+(.+)'))
+    async def manage_channels(event):
+        global REQUIRED_CHANNELS
+        action = event.pattern_match.group(1)
+        channel_name = event.pattern_match.group(2).strip()
+
+        # Приводим к формату с @ если забыли написать
+        if not channel_name.startswith('@'):
+            channel_name = '@' + channel_name
+
+        if action == 'об':
+            if channel_name not in REQUIRED_CHANNELS:
+                REQUIRED_CHANNELS.append(channel_name)
+                await event.edit(f"✅ Канал `{channel_name}` добавлен в обязательные для подписки.")
+            else:
+                await event.edit(f"ℹ Канал `{channel_name}` уже есть в списке.")
+        elif action == 'необ':
+            if channel_name in REQUIRED_CHANNELS:
+                REQUIRED_CHANNELS.remove(channel_name)
+                await event.edit(f"🗑 Канал `{channel_name}` удален из обязательных.")
+            else:
+                await event.edit(f"❌ Канал `{channel_name}` не найден в списке.")
+
+    # === ФИЛЬТР ЛИЧНЫХ СООБЩЕНИЙ ===
     @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
     async def private_message_handler(event):
         sender = await event.get_sender()
@@ -64,7 +89,7 @@ def main():
             await event.respond(warning_text)
 
     with client:
-        print("🚀 Gatekeeper is running successfully!")
+        print("🚀 Gatekeeper with commands is running successfully!")
         client.run_until_disconnected()
 
 if __name__ == "__main__":
