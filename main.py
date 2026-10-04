@@ -2,7 +2,7 @@ import os
 import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telethon import TelegramClient, events, Button
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import GetParticipantRequest
 
@@ -30,10 +30,10 @@ SESSION_STRING = os.environ.get("SESSION_STRING")
 
 REQUIRED_CHANNELS = ["skuprat", "RatLolz"]
 
-# Хранилище ID отправленных сообщений: {user_id: message_id}
+# Хранилище ID отправленных сообщений-предупреждений: {user_id: message_id}
 warn_messages = {}
 
-# Хранилище чатов с отключенной проверкой (.необ)
+# Хранилище чатов, где обязательная подписка ИСКЛЮЧЕНА (через .необ)
 disabled_chats = set()
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -62,83 +62,70 @@ async def command_handler(event):
     if text == ".необ":
         disabled_chats.add(chat_id)
         await event.edit("🔓 <b>Обязательная подписка для этого чата ОТКЛЮЧЕНА!</b>", parse_mode="html")
+        print(f"⚙️ Фильтр отключен для чата: {chat_id}")
 
     elif text == ".об":
         disabled_chats.discard(chat_id)
         await event.edit("🔒 <b>Обязательная подписка для этого чата ВКЛЮЧЕНА!</b>", parse_mode="html")
+        print(f"⚙️ Фильтр включен для чата: {chat_id}")
 
 
-# === 4. ОБРАБОТКА НАЖАТИЙ НА ИНЛАЙН-КНОПКУ «ПРОВЕРИТЬ ПОДПИСКУ» ===
-@client.on(events.CallbackQuery(data=b"check_sub"))
-async def check_callback(event):
-    user_id = event.sender_id
-
-    if await is_subscribed_to_all(user_id):
-        # Если подписался — показываем всплывашку и удаляем сообщение
-        await event.answer("✅ Доступ получен! Напиши мне снова.", alert=True)
-        try:
-            await event.delete()
-        except Exception:
-            pass
-        warn_messages.pop(user_id, None)
-    else:
-        # Если ещё не подписался
-        await event.answer("❌ Ты ещё не подписался на все каналы!", alert=True)
-
-
-# === 5. ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ===
+# === 4. ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ===
 @client.on(events.NewMessage(incoming=True))
 async def check_private_messages(event):
     if not event.is_private:
         return
 
     sender = await event.get_sender()
+    
     if not sender or getattr(sender, 'bot', False) or getattr(sender, 'is_self', False):
         return
 
     user_id = event.sender_id
     chat_id = event.chat_id
 
+    # Если в этом чате отключили фильтр командой .необ — пропускаем
     if chat_id in disabled_chats:
         return
 
-    # Если уже подписан — удаляем предыдущую плашку (если была) и пропускаем
+    # Если пользователь ПОДПИСАН на все каналы:
     if await is_subscribed_to_all(user_id):
+        # Если ранее ему отправлялось плашка с планом подписки — удаляем её
         if user_id in warn_messages:
             msg_id = warn_messages.pop(user_id)
             try:
                 await client.delete_messages(user_id, msg_id)
-            except Exception:
-                pass
+                print(f"🧹 Служебное сообщение удалено для {user_id} после подписки.")
+            except Exception as e:
+                print(f"Ошибка при удалении служебного сообщения: {e}")
         return
 
-    # Если подписки НЕТ:
+    # Если подписки НЕТ и фильтр активен:
     print(f"🚫 Сообщение от {user_id} удалено (нет подписки).")
 
-    # 1. Удаляем входящее сообщение
+    # 1. Удаляем входящее сообщение от юзера
     try:
         await event.delete(revoke=True)
     except Exception as e:
         print(f"Ошибка при удалении входящего: {e}")
 
-    # 2. Отправляем сообщение с инлайн-кнопками
+    # 2. Отправляем предупреждение только один раз и запоминаем ID сообщения
     if user_id not in warn_messages:
-        full_text = "👋 <b>Ку! Чтобы писать мне в ЛС, подпишись на каналы:</b>"
-        
-        # Конструктор инлайн-кнопок
-        buttons = [
-            [Button.url("📢 Канал @skuprat", "https://t.me/skuprat")],
-            [Button.url("📢 Канал @RatLolz", "https://t.me/RatLolz")],
-            [Button.inline("🔄 Проверить подписку", data=b"check_sub")]
-        ]
+        full_text = (
+            "👋 <b>Ку что бы писать мне</b>\n"
+            "<b>подпишись на каналы</b>\n"
+            "<blockquote><b>Канал @skuprat</b>\n"
+            "<b>Канал @RatLolz</b></blockquote>"
+        )
 
         try:
             sent_msg = await client.send_message(
                 user_id,
                 full_text,
                 parse_mode='html',
-                buttons=buttons
+                link_preview=False
             )
+            # Запоминаем ID отправленного сообщения
             warn_messages[user_id] = sent_msg.id
         except Exception as e:
             print(f"Ошибка при отправке: {e}")
