@@ -30,8 +30,8 @@ SESSION_STRING = os.environ.get("SESSION_STRING")
 
 REQUIRED_CHANNELS = ["skuprat", "RatLolz"]
 
-# Хранилище предупрежденных пользователей
-warned_users = set()
+# Хранилище ID отправленных сообщений-предупреждений: {user_id: message_id}
+warn_messages = {}
 
 # Хранилище чатов, где обязательная подписка ИСКЛЮЧЕНА (через .необ)
 disabled_chats = set()
@@ -73,44 +73,44 @@ async def command_handler(event):
 # === 4. ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ===
 @client.on(events.NewMessage(incoming=True))
 async def check_private_messages(event):
-    # Работаем только в личных сообщениях
     if not event.is_private:
         return
 
     sender = await event.get_sender()
     
-    # Игнорируем:
-    # - Если нет отправителя
-    # - Если отправитель — БОТ
-    # - Если сообщение отправлено самим собой
     if not sender or getattr(sender, 'bot', False) or getattr(sender, 'is_self', False):
         return
 
     user_id = event.sender_id
     chat_id = event.chat_id
 
-    # Если в этом чате вы отключили фильтр командой .необ — пропускаем
+    # Если в этом чате отключили фильтр командой .необ — пропускаем
     if chat_id in disabled_chats:
         return
 
-    # Если пользователь подписан на все каналы — пропускаем
+    # Если пользователь ПОДПИСАН на все каналы:
     if await is_subscribed_to_all(user_id):
-        warned_users.discard(user_id)
+        # Если ранее ему отправлялось плашка с планом подписки — удаляем её
+        if user_id in warn_messages:
+            msg_id = warn_messages.pop(user_id)
+            try:
+                await client.delete_messages(user_id, msg_id)
+                print(f"🧹 Служебное сообщение удалено для {user_id} после подписки.")
+            except Exception as e:
+                print(f"Ошибка при удалении служебного сообщения: {e}")
         return
 
     # Если подписки НЕТ и фильтр активен:
     print(f"🚫 Сообщение от {user_id} удалено (нет подписки).")
 
-    # 1. Удаляем входящее сообщение
+    # 1. Удаляем входящее сообщение от юзера
     try:
         await event.delete(revoke=True)
     except Exception as e:
-        print(f"Ошибка при удалении: {e}")
+        print(f"Ошибка при удалении входящего: {e}")
 
-    # 2. Отправляем предупреждение только один раз
-    if user_id not in warned_users:
-        warned_users.add(user_id)
-
+    # 2. Отправляем предупреждение только один раз и запоминаем ID сообщения
+    if user_id not in warn_messages:
         full_text = (
             "👋 <b>Ку что бы писать мне</b>\n"
             "<b>подпишись на каналы</b>\n"
@@ -119,12 +119,14 @@ async def check_private_messages(event):
         )
 
         try:
-            await client.send_message(
+            sent_msg = await client.send_message(
                 user_id,
                 full_text,
                 parse_mode='html',
                 link_preview=False
             )
+            # Запоминаем ID отправленного сообщения
+            warn_messages[user_id] = sent_msg.id
         except Exception as e:
             print(f"Ошибка при отправке: {e}")
 
