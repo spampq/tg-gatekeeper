@@ -3,8 +3,10 @@ import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
+from telethon.tl.functions.channels import GetParticipantRequest
 
-# === ФЕЙКОВЫЙ СЕРВЕР ДЛЯ ОБХОДА ПРОВЕРКИ ПОРТОВ RENDER ===
+# === 1. ВЕБ-СЕРВЕР ДЛЯ ОБХОДА ПРОВЕРКИ ПОРТОВ RENDER ===
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -21,54 +23,69 @@ def run_health_check_server():
 
 threading.Thread(target=run_health_check_server, daemon=True).start()
 
-# === ПЕРЕМЕННЫЕ ИЗ RENDER ENVIRONMENT ===
-API_ID = int(os.environ.get("API_ID", "28155925"))
+# === 2. ДАННЫЕ И НАСТРОЙКИ АВТОРИЗАЦИИ ===
+API_ID = int(os.environ.get("API_ID", 28155925))
 API_HASH = os.environ.get("API_HASH", "13cf6bb2641bfb7e67548650d65d9e7e")
 SESSION_STRING = os.environ.get("SESSION_STRING")
 
-# Юзернейм канала для обязательной подписки (без @)
-CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "your_channel_here")
+REQUIRED_CHANNELS = ["skuprat", "RatLolz"]
 
-# Сообщение с требованием подписаться
-REQUIRE_SUB_TEXT = f"👋 Привет! Чтобы писать мне в ЛС, подпишись на наш канал:\nhttps://t.me/{CHANNEL_USERNAME}\n\nПосле подписки напиши мне снова!"
+# Инициализация с использованием StringSession
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
-client = TelegramClient(
-    StringSession(SESSION_STRING),
-    API_ID,
-    API_HASH,
-    device_model="Samsung Galaxy S22",
-    system_version="Android 13",
-    app_version="10.2.0",
-    lang_code="ru"
-)
+async def is_subscribed_to_all(user_id):
+    """Проверяет подписку пользователя на все каналы."""
+    for channel in REQUIRED_CHANNELS:
+        try:
+            await client(GetParticipantRequest(
+                channel=channel,
+                participant=user_id
+            ))
+        except Exception:
+            return False
+    return True
 
-# Храним список проверенных юзеров в памяти
-approved_users = set()
+@client.on(events.NewMessage(incoming=True))
+async def check_private_messages(event):
+    if not event.is_private:
+        return
 
-@client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
-async def gatekeeper_handler(event):
     sender = await event.get_sender()
-    if not sender or sender.bot:
+    if not sender or getattr(sender, 'bot', False) or getattr(sender, 'is_self', False):
         return
 
-    user_id = sender.id
-    if user_id in approved_users:
-        return
+    user_id = event.sender_id
 
-    try:
-        # Проверяем подписку юзера на канал
-        await client.get_permissions(CHANNEL_USERNAME, user_id)
-        approved_users.add(user_id)
-    except Exception:
-        # Если не подписан — отправляем сообщение
-        await event.reply(REQUIRE_SUB_TEXT)
-        # Отменяем дальнейшую обработку сообщения
-        raise events.StopPropagation
+    if not await is_subscribed_to_all(user_id):
+        print(f"🚫 Сообщение от {user_id} удалено (нет подписки).")
+
+        # Удаляем входящее сообщение
+        try:
+            await event.delete(revoke=True)
+        except Exception as e:
+            print(f"Ошибка при удалении: {e}")
+
+        # HTML-разметка: <b> — жирный текст, <blockquote> — цитата
+        full_text = (
+            "👋 <b>Ку что бы писать мне</b>\n"
+            "<b>подпишись на каналы</b>\n"
+            "<blockquote><b>Канал @skuprat</b>\n"
+            "<b>Канал @RatLolz</b></blockquote>"
+        )
+
+        try:
+            await client.send_message(
+                user_id,
+                full_text,
+                parse_mode='html',
+                link_preview=False
+            )
+        except Exception as e:
+            print(f"Ошибка при отправке: {e}")
 
 async def main():
-    print("Юзербот Gatekeeper запускается...")
+    print("🚀 Юзербот-фильтр ЛС запущен!")
     await client.start()
-    print("Юзербот успешно работает!")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
