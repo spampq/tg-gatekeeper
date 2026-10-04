@@ -30,6 +30,9 @@ SESSION_STRING = os.environ.get("SESSION_STRING")
 
 REQUIRED_CHANNELS = ["skuprat", "RatLolz"]
 
+# Множество для хранения ID пользователей, которым МЫ УЖЕ отправляли предупреждение
+warned_users = set()
+
 # Инициализация с использованием StringSession
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
@@ -56,16 +59,26 @@ async def check_private_messages(event):
 
     user_id = event.sender_id
 
-    if not await is_subscribed_to_all(user_id):
-        print(f"🚫 Сообщение от {user_id} удалено (нет подписки).")
+    # Если пользователь подписан на все каналы — пропускаем его сообщения
+    if await is_subscribed_to_all(user_id):
+        # Если он ранее был в списке предупрежденных, удаляем его оттуда
+        warned_users.discard(user_id)
+        return
 
-        # Удаляем входящее сообщение
-        try:
-            await event.delete(revoke=True)
-        except Exception as e:
-            print(f"Ошибка при удалении: {e}")
+    # Если подписки НЕТ:
+    print(f"🚫 Сообщение от {user_id} удалено (нет подписки).")
 
-        # HTML-разметка: <b> — жирный текст, <blockquote> — цитата
+    # 1. Всегда удаляем входящее сообщение
+    try:
+        await event.delete(revoke=True)
+    except Exception as e:
+        print(f"Ошибка при удалении: {e}")
+
+    # 2. Проверяем, отправляли ли мы уже автоответ
+    if user_id not in warned_users:
+        # Добавляем юзера в список предупрежденных
+        warned_users.add(user_id)
+
         full_text = (
             "👋 <b>Ку что бы писать мне</b>\n"
             "<b>подпишись на каналы</b>\n"
