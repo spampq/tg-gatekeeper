@@ -1,16 +1,18 @@
 import os
+import asyncio
 import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.functions.channels import GetParticipantRequest
 
 # === 1. ВЕБ-СЕРВЕР ДЛЯ РАБОТЫ НА RENDER ===
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Userbot is running!")
+        self.wfile.write(b"Gatekeeper Userbot is running!")
 
     def log_message(self, format, *args):
         return
@@ -20,6 +22,7 @@ def run_health_check_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
+# Запускаем веб-сервер в фоновом потоке
 threading.Thread(target=run_health_check_server, daemon=True).start()
 
 # === 2. НАСТРОЙКИ ЮЗЕРБОТА ===
@@ -27,69 +30,107 @@ API_ID = int(os.environ.get("API_ID", 28155925))
 API_HASH = os.environ.get("API_HASH", "13cf6bb2641bfb7e67548650d65d9e7e")
 SESSION_STRING = os.environ.get("SESSION_STRING", "")
 
-# Список каналов по умолчанию
 REQUIRED_CHANNELS = ["@skuprat", "@RatLolz"]
+
+# Хранилище ID отправленных сообщений-предупреждений: {user_id: message_id}
+warn_messages = {}
+# Хранилище чатов, где обязательная подписка ИСКЛЮЧЕНА (через .необ)
+disabled_chats = set()
 
 def main():
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
-    async def check_subscription(user_id):
+    async def is_subscribed_to_all(user_id):
+        """Проверяет подписку пользователя на все каналы."""
         for channel in REQUIRED_CHANNELS:
             try:
-                participant = await client.get_permissions(channel, user_id)
-                if not participant:
-                    return False
+                await client(GetParticipantRequest(
+                    channel=channel,
+                    participant=user_id
+                ))
             except Exception:
                 return False
         return True
 
-    # === КОМАНДЫ УПРАВЛЕНИЯ КАНАЛАМИ (.об / .необ) ===
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^\.(об|необ)\s+(.+)'))
-    async def manage_channels(event):
-        global REQUIRED_CHANNELS
-        action = event.pattern_match.group(1)
-        channel_name = event.pattern_match.group(2).strip()
-
-        # Приводим к формату с @ если забыли написать
-        if not channel_name.startswith('@'):
-            channel_name = '@' + channel_name
-
-        if action == 'об':
-            if channel_name not in REQUIRED_CHANNELS:
-                REQUIRED_CHANNELS.append(channel_name)
-                await event.edit(f"✅ Канал `{channel_name}` добавлен в обязательные для подписки.")
-            else:
-                await event.edit(f"ℹ Канал `{channel_name}` уже есть в списке.")
-        elif action == 'необ':
-            if channel_name in REQUIRED_CHANNELS:
-                REQUIRED_CHANNELS.remove(channel_name)
-                await event.edit(f"🗑 Канал `{channel_name}` удален из обязательных.")
-            else:
-                await event.edit(f"❌ Канал `{channel_name}` не найден в списке.")
-
-    # === ФИЛЬТР ЛИЧНЫХ СООБЩЕНИЙ ===
-    @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
-    async def private_message_handler(event):
-        sender = await event.get_sender()
-        if not sender or sender.bot or sender.id == (await client.get_me()).id:
+    # === 3. КОМАНДЫ УПРАВЛЕНИЯ (ТОЛЬКО ОТ ТЕБЯ) ===
+    @client.on(events.NewMessage(outgoing=True))
+    async def command_handler(event):
+        if not event.is_private:
             return
 
-        is_subscribed = await check_subscription(sender.id)
-        if not is_subscribed:
-            try:
-                await event.delete()
-            except Exception:
-                pass
+        text = event.raw_text.strip().lower()
+        chat_id = event.chat_id
 
-            channels_text = ", ".join(REQUIRED_CHANNELS)
-            warning_text = (
-                f"❌ **Доступ ограничен!**\n\nЧтобы написать мне, подпишитесь на "
-                f"каналы: {channels_text}\nПосле подписки отправьте сообщение заново."
+        if text == ".необ":
+            disabled_chats.add(chat_id)
+            await event.edit("🔓 <b>Обязательная подписка для этого чата ОТКЛЮЧЕНА!</b>", parse_mode="html")
+            print(f"⚙️ Фильтр отключен для чата: {chat_id}")
+
+        elif text == ".об":
+            disabled_chats.discard(chat_id)
+            await event.edit("🔒 <b>Обязательная подписка для этого чата ВКЛЮЧЕНА!</b>", parse_mode="html")
+            print(f"⚙️ Фильтр включен для чата: {chat_id}")
+
+    # === 4. ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ===
+    @client.on(events.NewMessage(incoming=True))
+    async def check_private_messages(event):
+        if not event.is_private:
+            return
+
+        sender = await event.get_sender()
+        if not sender or getattr(sender, 'bot', False) or getattr(sender, 'is_self', False):
+            return
+
+        user_id = event.sender_id
+        chat_id = event.chat_id
+
+        # Если в этом чате отключили фильтр командой .необ — пропускаем
+        if chat_id in disabled_chats:
+            return
+
+        # Если пользователь ПОДПИСАН на все каналы:
+        if await is_subscribed_to_all(user_id):
+            # Если ранее отправлялась плашка с требованием подписки — удаляем её
+            if user_id in warn_messages:
+                msg_id = warn_messages.pop(user_id)
+                try:
+                    await client.delete_messages(user_id, msg_id)
+                    print(f"🧹 Служебное сообщение удалено для {user_id} после подписки.")
+                except Exception as e:
+                    print(f"Ошибка при удалении служебного сообщения: {e}")
+            return
+
+        # Если подписки НЕТ и фильтр активен:
+        print(f"🚫 Сообщение от {user_id} удалено (нет подписки).")
+
+        # 1. Удаляем входящее сообщение от юзера
+        try:
+            await event.delete(revoke=True)
+        except Exception as e:
+            print(f"Ошибка при удалении входящего: {e}")
+
+        # 2. Отправляем предупреждение только один раз и запоминаем ID сообщения
+        if user_id not in warn_messages:
+            full_text = (
+                "👋 <b>Ку что бы писать мне</b>\n"
+                "<b>подпишись на каналы</b>\n"
+                "<blockquote><b>Канал @skuprat</b>\n"
+                "<b>Канал @RatLolz</b></blockquote>"
             )
-            await event.respond(warning_text)
+
+            try:
+                sent_msg = await client.send_message(
+                    user_id,
+                    full_text,
+                    parse_mode='html',
+                    link_preview=False
+                )
+                warn_messages[user_id] = sent_msg.id
+            except Exception as e:
+                print(f"Ошибка при отправке предупреждения: {e}")
 
     with client:
-        print("🚀 Gatekeeper with commands is running successfully!")
+        print("🚀 Gatekeeper Userbot is running successfully!")
         client.run_until_disconnected()
 
 if __name__ == "__main__":
